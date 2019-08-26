@@ -111,17 +111,15 @@ def dmi_state_images(image: Image.Image, index: int, frames: int, directions: in
         )
         cropped_image = image.crop(box)
         individual_frames.append(cropped_image)
-    # TODO: Fix
     column_count = ceil(sqrt(image_count))
     target_image_size = (column_count * size[0], ceil(image_count / column_count) * size[1])
     target_image = Image.new("RGBA", size=target_image_size)
-    # TODO: FIX ME?
     for idx, frame in enumerate(individual_frames):
         box = (
             (idx * size[0]) % target_image_size[0],
-            int(idx / target_image_size[0]) * size[1],
+            int(idx / target_image_size[0] * size[1]) * size[1],
             (idx * size[0]) % target_image_size[0] + size[0],
-            int(idx / target_image_size[0]) * size[1] + size[1],
+            int(idx / target_image_size[0] * size[1]) * size[1] + size[1],
         )
         # This here mainly if I'm being dumb
         if box[1] > target_image_size[0]:

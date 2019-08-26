@@ -28,6 +28,8 @@ class RSIState:
         self.name = name
         self.directions = directions  # TODO: Look at https://github.com/space-wizards/RSI
         # Don't use mutable in __init__ or Guido gets you
+        if not delays:
+            delays = []
         self.delays = delays
         self.select = select
         self.flags = flags
@@ -43,7 +45,7 @@ class RSIState:
             "directions": self.directions,
         }
         if self.delays:
-            meta_json.update({"delays": [self.delays for i in range(self.directions)]})
+            meta_json.update({"delays": [self.delays for _ in range(self.directions)]})
         if self.select:
             meta_json.update({"select": self.select})
         return meta_json

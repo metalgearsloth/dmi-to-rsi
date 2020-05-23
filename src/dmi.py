@@ -89,7 +89,12 @@ class DMI:
                 else:
                     logger.critical(f"Unable to find value format for {value}")
                     raise InvalidMetadataException(f"Unable to find value format for {value}")
+
+                if description == "delay":
+                    value = [x / 10 for x in value]
+
                 output["states"][-1].update({description: value})
+
         return output
 
 

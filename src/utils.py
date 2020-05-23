@@ -6,6 +6,7 @@ from io import BytesIO
 from logging import Logger, getLogger
 from PIL import Image, ImageChops
 import os
+from time import sleep
 
 
 logger: Logger = getLogger(__name__)
@@ -81,24 +82,54 @@ def convert_dmi_to_many_rsi(dmi_data, rsi_path: str, mode=None, **kwargs) -> Non
     # Doesn't even matter if dupe because this is hacky
     # This will ignore blank stuff which means it will likely miss things with bad names
     dmi_groups = []
-    if mode in [None, "helmets"]:
-        dmi_groups += [x.name for x in dmi.states]
     if mode in ["guns", ]:
         dmi_groups += ["-".join(x.name.split("-")[0:-1]) if len(x.name.split("-")) > 1 else x.name
                         for x in dmi.states if x.name]
     if mode in ["mags", ]:
         dmi_groups += ["-".join(x.name.split("-")[0:-1]) for x in dmi.states if x.name and x.name[-1].isdigit()]
+        dmi_groups += [x.name for x in dmi.states if len([c for c in x.name if not c.isdigit()]) == len(x.name)]
+    if mode in ["ammo_boxes", ]:
+        dmi_groups += ["-".join(x.name.split("-")[0:-1]) for x in dmi.states if x.name and x.name.count("-") >= 2]
+        dmi_groups += [x.name.split("-")[0] for x in dmi.states
+                       if x.name and x.name.count("-") <= 1 and x.name.split("-")[-1].isdigit()]
     if mode in [None, "wall"]:
         dmi_groups += [_strip_numbers(x.name) for x in dmi.states if _strip_numbers(x.name)]
+    if mode == "door":
+        dmi_groups = [f"{rsi_path}"]
+    if not dmi_groups:
+        dmi_groups += [x.name for x in dmi.states]
 
     dmi_groups = set([x for x in dmi_groups if x != ""])
     icon_dmi = None
-    if mode == "helmets" and kwargs.get("icons"):
+    if kwargs.get("icons"):
         # Try and match icons as they use lower res images and are a bit more polished (rather than just resizing)
         icon_dmi = DMI(kwargs['icons'])
     for group in dmi_groups:
         logger.debug(f"Group is {group}")
         rsi_states = []
+        if mode == "door":
+            for state in dmi.states:
+                name = {
+                    "door_closed": "closed",
+                    "door_closing": "closing_unlit",
+                    "door_closing_stat": "closing",
+                    "door_deny": "deny",
+                    "door_locked": "locked",
+                    "door_open": "open",
+                    "door_opening": "opening_unlit",
+                    "door_opening_stat": "opening",
+                    "door_spark": "spark",
+                    "o_door_closing": "panel_closing",
+                    "o_door_opening": "panel_opening",
+                }.get(state.name, state.name)
+
+                rsi_state = RSIState(
+                    data=state.image,
+                    name=name,
+                    directions=state.dirs,
+                    delays=state.delay,
+                )
+                rsi_states.append(rsi_state)
         if mode == "wall" and f"{group}0" in [x.name for x in dmi.states]:
 
             # If it's wall mode then you also need a "full" derived from <statename>0
@@ -226,6 +257,26 @@ def convert_dmi_to_many_rsi(dmi_data, rsi_path: str, mode=None, **kwargs) -> Non
                     )
                     rsi_states.append(rsi_state)
         # For this we'll be a little more strict
+        elif mode == "ammo_boxes":
+            for state in dmi.states:
+                # If 2 dashes it's probs box38-rubber-30
+                # If not it's probs box38-30
+                if state.name.count("-") == 2:
+                    state_name = "-".join(state.name.split("-")[0:-1])
+                elif state.name.count("-") == 1 and state.name.split("-")[-1].isdigit():
+                    state_name = state.name.split("-")[0]
+                else:
+                    state_name = state.name
+                if state_name == group:
+                    rsi_state = RSIState(
+                        data=state.image,
+                        name=state.name,
+                        directions=state.dirs,
+                        delays=state.delay,
+                    )
+                else:
+                    continue
+                rsi_states.append(rsi_state)
         elif mode == "mags":
             for state in dmi.states:
                 if "".join(state.name.split("-")[0:-1]) == group:
@@ -236,6 +287,25 @@ def convert_dmi_to_many_rsi(dmi_data, rsi_path: str, mode=None, **kwargs) -> Non
                         delays=state.delay,
                     )
                     rsi_states.append(rsi_state)
+        elif mode in ["food"]:
+            for state in dmi.states:
+                if state.name == group:
+                    rsi_state = RSIState(
+                        data=state.image,
+                        name=state.name,
+                        directions=state.dirs,
+                        delays=state.delay,
+                    )
+                    rsi_states.append(rsi_state)
+        elif mode in ["suits"]:
+            for state in dmi.states:
+                if state.name == group:
+                    rsi_states.append(RSIState(
+                        data=state.image,
+                        name="equipped-OUTERCLOTHING",
+                        directions=state.dirs,
+                        delays=state.delay
+                    ))
         else:
             for state in dmi.states:
                 if state.name.startswith(group):
@@ -253,7 +323,10 @@ def convert_dmi_to_many_rsi(dmi_data, rsi_path: str, mode=None, **kwargs) -> Non
 
         # If in guns / mags mode we need to get linear steps
         # TODO: Just break these out at this point
-        if mode in ["guns", "mags"] and rsi_states:
+        # Get unique
+        if mode == "ammo_boxes":
+            rsi_states = list(set(rsi_states))
+        if mode in ["ammo_boxes", "guns", "mags"] and rsi_states:
             logger.info("Correcting steps")
             sorted_states = sorted(rsi_states, key=lambda x: x.name)
             # If guns: Try sorting by: Ammo account, full / empty, slide, loaded, etc.
@@ -279,17 +352,23 @@ def convert_dmi_to_many_rsi(dmi_data, rsi_path: str, mode=None, **kwargs) -> Non
                     new_states.extend(sorted([x for x in sorted_states if [c for c in x.name if c.isdigit()]],
                                              key=lambda x: "".join([c for c in x.name if c.isdigit()])))
                     sorted_states = new_states
+            elif mode == "ammo_boxes":
+                # Sort by ammo acount at the box
+                sorted_states = sorted(sorted_states, key=lambda x: int(x.name.split("-")[-1]) if x.name.split("-")[-1].isdigit() else -1)
+            else:
+                pass
+
             if mode == "mags":
                 for idx, state in enumerate(sorted_states):
                     state.name = f"{group.lower()}-{idx}"
-            elif mode == "guns":
+            elif mode in ["ammo_boxes", "guns"]:
                 for idx, state in enumerate(sorted_states[1:]):
                     state.name = f"{group.lower()}-{idx}"
                 sorted_states[0].name = group.lower()
             else:
                 raise Exception
             # Also add a base state for the icon
-            if mode == "mags":
+            if mode in ["mags"]:
                 last_state = sorted_states[-1]
                 sorted_states.append(RSIState(
                     data=last_state.image,
@@ -315,32 +394,97 @@ def convert_dmi_to_many_rsi(dmi_data, rsi_path: str, mode=None, **kwargs) -> Non
                 ])
             rsi_states = sorted_states
 
-        if mode == "helmets" and kwargs.get("icons"):
+        if mode in ["gloves", "helmets", "shoes", "suits"]:
+            clothes_name = {"gloves": "HAND", "helmets": "HELMET", "shoes": "FEET", "suits": "OUTERCLOTHING"}[mode]
+            inhand_y_offset = {"shoes": -4}[mode]
             inhand_left_image = Image.new("RGBA", size=(64, 64))
             inhand_right_image = Image.new("RGBA", size=(64, 64))
-            # Get top left (facing forward) to use
-            # Centered on the axis which is annoying and doesn't fit nicely into 16 x 16
-            base_image_small: Image.Image = rsi_states[0].image.copy().crop(box=(9, 0, 22, 13))
-            base_image_small = ImageChops.offset(base_image_small, xoffset=0, yoffset=0)
-            base_image = Image.new("RGBA", size=(16, 16))
 
-            # "Centre" it more for the below
-            base_image = ImageChops.offset(base_image, xoffset=0, yoffset=2)
+            # Match image if there's multiple states (e.g. regular and up)
+            if [1 for x in rsi_states if x.name == group]:
+                base_image = [x.image.copy() for x in rsi_states if x.name == group][0]
+            elif len(rsi_states) == 1:
+                base_image = rsi_states[0].image.copy()
+            elif [1 for x in rsi_states if x.name == f"equipped-{clothes_name}"]:
+                base_image = [x.image.copy() for x in rsi_states if x.name == f"equipped-{clothes_name}"][0]
+            else:
+                raise Exception
+            if mode in ["gloves", "helmets", "shoes"]:
+                # Centered on the axis which is annoying and doesn't fit nicely into 16 x 16
+                if mode == "shoes":
+                    forward_image = base_image.copy().crop(box=(8, 16, 24, 32))
+                    backward_image = base_image.copy().crop(box=(40, 16, 56, 32))
+                    right_image = base_image.copy().crop(box=(6, 48, 22, 64))
+                    left_image = base_image.copy().crop(box=(42, 48, 58, 64))
+                else:
+                    forward_image = base_image.copy().crop(box=(8, 0, 24, 16))
+                    backward_image = base_image.copy().crop(box=(40, 0, 56, 16))
+                    right_image = base_image.copy().crop(box=(6, 32, 22, 48))
+                    left_image = base_image.copy().crop(box=(42, 32, 58, 48))
 
-            base_image.paste(base_image_small, box=(1, 1, 14, 14))
+                # Try and match an icon, otherwise just resize one
+                matched_icons = [x for x in icon_dmi.states if x.name == group] if icon_dmi else None
 
-            rotated = base_image.rotate(270)
-            rotated_again = base_image.rotate(90)
-            final_space_left_hand = ImageChops.offset(base_image, xoffset=0, yoffset=-1).rotate(90)
-            final_space_right_hand = ImageChops.offset(base_image, xoffset=0, yoffset=-1).rotate(270)
+                if matched_icons:
+                    icon_state: DMIState = matched_icons[0]
+                    rsi_states.append(RSIState(
+                        data=icon_state.image,
+                        name="icon",
+                        directions=1,
+                        delays=[1.0]
+                    ))
+                    forward_image = icon_state.image.copy()
+                    backward_image = icon_state.image.copy()
+                    right_image = icon_state.image.copy()
+                    left_image = icon_state.image.copy()
 
-            inhand_left_image.paste(ImageChops.offset(rotated, xoffset=0, yoffset=1), box=(16, 16, 32, 32))
-            inhand_left_image.paste(ImageChops.offset(rotated_again, xoffset=0, yoffset=0), box=(32, 16, 48, 32))
-            inhand_left_image.paste(final_space_left_hand, box=(48, 48, 64, 64))
+                    forward_image.thumbnail((16, 16), Image.AFFINE)
+                    backward_image.thumbnail((16, 16), Image.AFFINE)
+                    right_image.thumbnail((16, 16), Image.AFFINE)
+                    left_image.thumbnail((16, 16), Image.AFFINE)
 
-            inhand_right_image.paste(ImageChops.offset(rotated_again, xoffset=0, yoffset=-1), box=(0, 16, 16, 32))
-            inhand_right_image.paste(ImageChops.offset(rotated, xoffset=0, yoffset=0), box=(48, 16, 64, 32))
-            inhand_right_image.paste(final_space_right_hand, box=(0, 48, 16, 64))
+                else:
+                    icon_image = Image.new("RGBA", size=(32, 32))
+                    icon_image.paste(forward_image, box=(8, 4, 24, 20))
+                    rsi_states.append(RSIState(
+                        data=icon_image,
+                        name="icon",
+                        directions=1,
+                        delays=[1.0]
+                    ))
+
+            elif mode == "suits":
+                forward_image = base_image.copy().crop(box=(0, 0, 32, 32))
+                backward_image = base_image.copy().crop(box=(32, 0, 64, 32))
+                right_image = base_image.copy().crop(box=(0, 32, 32, 64))
+                left_image = base_image.copy().crop(box=(32, 32, 64, 64))
+
+                icon_image: Image.Image = Image.new("RGBA", size=(32, 32))
+                icon_image.paste(forward_image, box=(0, 0, 32, 32))
+                rsi_states.append(RSIState(
+                    data=icon_image,
+                    name="icon",
+                    directions=1,
+                    delays=[1.0]
+                ))
+
+                thumb_size = 16, 16
+
+                forward_image.thumbnail(thumb_size, Image.AFFINE)
+                backward_image.thumbnail(thumb_size, Image.AFFINE)
+                right_image.thumbnail(thumb_size, Image.AFFINE)
+                left_image.thumbnail(thumb_size, Image.AFFINE)
+
+            else:
+                raise Exception
+
+            inhand_left_image.paste(forward_image, box=(16, inhand_y_offset + 16, 32, inhand_y_offset + 32))
+            inhand_left_image.paste(backward_image, box=(32, inhand_y_offset + 16, 48, inhand_y_offset + 32))
+            inhand_left_image.paste(left_image, box=(40, inhand_y_offset + 48, 56, inhand_y_offset + 64))
+
+            inhand_right_image.paste(forward_image, box=(0, inhand_y_offset + 16, 16, inhand_y_offset + 32))
+            inhand_right_image.paste(backward_image, box=(48, inhand_y_offset + 16, 64, inhand_y_offset + 32))
+            inhand_right_image.paste(right_image, box=(8, inhand_y_offset + 48, 24, inhand_y_offset + 64))
 
             rsi_states.append(RSIState(
                 data=inhand_left_image,
@@ -355,46 +499,29 @@ def convert_dmi_to_many_rsi(dmi_data, rsi_path: str, mode=None, **kwargs) -> Non
                 delays=[1.0],
             ))
 
-            # Try and match an icon, otherwise just resize one
-            matched_icons = [x for x in icon_dmi.states if x.name == group]
-            if matched_icons:
-                icon_state: DMIState = matched_icons[0]
-                rsi_states.append(RSIState(
-                    data=icon_state.image,
-                    name="icon",
-                    directions=1,
-                    delays=[1.0]
-                ))
-            else:
-                icon_image: Image.Image = Image.new("RGBA", size=(32, 32))
-                icon_image.paste(base_image, box=(8, 8, 24, 24))
-                rsi_states.append(RSIState(
-                    data=icon_image,
-                    name="icon",
-                    directions=1,
-                    delays=[1.0]
-                ))
-
-            if len(rsi_states) == 4 and not [1 for x in rsi_states if x.name == "equipped-HELMET"]:
+            if len(rsi_states) == 4 and not [1 for x in rsi_states if x.name == f"equipped-{clothes_name}"]:
                 for state in rsi_states:
                     if state.name not in ["icon", "inhand-left", "inhand-right"]:
-                        state.name = "equipped-HELMET"
+                        state.name = f"equipped-{clothes_name}"
             cleanup = []
             for state in rsi_states:
                 if state.name == group:
-                    state.name = "equipped-HELMET"
+                    state.name = f"equipped-{clothes_name}"
                     state.delays = [1.0, ]
-                if state.name in ["equipped-HELMET", "icon", "inhand-left", "inhand-right"]:
+                if state.name in [f"equipped-{clothes_name}", "icon", "inhand-left", "inhand-right"]:
                     cleanup.append(state)
             rsi_states = cleanup
 
-        if mode != "helmets" or [x for x in rsi_states if x.name == "equipped-HELMET"]:
+        if mode in ["food"] and len(rsi_states) == 1:
+            rsi_states[0].name = "icon"
+
+        if mode != "helmets" or [x for x in rsi_states if x.name in ["equipped-HELMET", "equipped-OUTERCLOTHING"]]:
             rsi = RSI(
                 size={"x": dmi.width, "y": dmi.height},
                 rsi_copyright=kwargs.get("rsi_copyright"),
                 states=rsi_states,
             )
-            target = os.path.join(rsi_path, f"{group.lower()}.rsi")
+            target = os.path.join(rsi_path, f"{group.lower().replace('-', '_')}.rsi")
             logger.info(f"Saved rsi to {target}")
             rsi.save_to(target)
     return
@@ -412,7 +539,7 @@ def convert_dmi_url_to_rsi(dmi_url: str, rsi_path: str) -> None:
 
 
 def convert_dmi_url_to_many_rsi(dmi_url: str, rsi_path: str, mode=None, **kwargs) -> None:
-    icons = None
+    icons_buffer = None
     session = Session()
     response = session.get(dmi_url)
     response.raise_for_status()
